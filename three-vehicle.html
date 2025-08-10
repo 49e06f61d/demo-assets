@@ -1,0 +1,208 @@
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Multiple Vehicle Responders</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        #map {
+            height: 100vh;
+            width: 100vw;
+        }
+
+        .face-marker {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            overflow: hidden;
+            border: 2px solid white;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+            background: white;
+            transform: scaleX(-1);
+        }
+
+        .face-marker img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+
+        .marker-label {
+            position: absolute;
+            top: -34px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.75);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+            white-space: nowrap;
+            line-height: 1.1em;
+            text-align: center;
+            pointer-events: none;
+        }
+    </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+</head>
+
+<body>
+    <div id="map"></div>
+    <script>
+        const map = L.map('map').setView([14.9, 120.25], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19
+        }).addTo(map);
+        const destination = [14.971739300715177, 120.16039138670942];
+        const destinationLabel = L.divIcon({
+            className: 'destination-label',
+            html: `
+        <div style="
+          background: rgba(255,0,0,0.8);
+          color: white;
+          padding: 4px 8px;
+          border-radius: 6px;
+          font-size: 14px;
+          font-weight: bold;
+          white-space: nowrap;
+          box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        ">
+          Road Accident #78
+        </div>
+      `,
+            iconSize: null,
+            iconAnchor: [50, -30]
+        });
+        L.marker(destination, {
+            icon: destinationLabel
+        }).addTo(map);
+
+        function haversine(lat1, lon1, lat2, lon2) {
+            const R = 6371,
+                toRad = deg => deg * Math.PI / 180;
+            const dLat = toRad(lat2 - lat1),
+                dLon = toRad(lon2 - lon1);
+            const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLon / 2) ** 2;
+            return 2 * R * Math.asin(Math.sqrt(a));
+        }
+
+        function getEasingMultiplier(progress) {
+            return Math.sin(progress * Math.PI);
+        }
+
+        function createVehicle(origin, destination, label, imgUrl, color = 'blue') {
+            fetch(`https://router.project-osrm.org/route/v1/driving/${origin[1]},${origin[0]};${destination[1]},${destination[0]}?overview=full&geometries=geojson`)
+                .then(res => res.json())
+                .then(data => {
+                    const coords = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+                    L.polyline(coords, {
+                        color
+                    }).addTo(map);
+                    map.fitBounds(L.latLngBounds(coords));
+                    const faceIcon = L.divIcon({
+                        className: '',
+                        html: `
+          <div style="position: relative; text-align:center;">
+            <div class="marker-label">
+              ${label}<br><span class="speed-text">0.0 km/h</span>
+            </div>
+            <div class="face-marker">
+              <img src="${imgUrl}" alt="avatar" />
+            </div>
+          </div>
+        `,
+                        iconSize: [50, 50],
+                        iconAnchor: [25, 25]
+                    });
+                    const marker = L.marker(coords[0], {
+                        icon: faceIcon
+                    }).addTo(map);
+                    const maxSpeedKmh = 120,
+                        minSpeedKmh = 40;
+                    let currentIndex = 0,
+                        progress = 0,
+                        lastTimestamp = null;
+
+                    function step(ts) {
+                        if (currentIndex >= coords.length - 1) return;
+                        if (!lastTimestamp) lastTimestamp = ts;
+                        const deltaTime = (ts - lastTimestamp) / 1000;
+                        lastTimestamp = ts;
+                        let [lat1, lon1] = coords[currentIndex];
+                        let [lat2, lon2] = coords[currentIndex + 1];
+                        let segDistKm = haversine(lat1, lon1, lat2, lon2);
+                        const routeProgress = currentIndex / (coords.length - 1);
+                        const easing = getEasingMultiplier(routeProgress);
+                        const speedKmh = Math.max(minSpeedKmh, minSpeedKmh + (maxSpeedKmh - minSpeedKmh) * easing);
+                        let kmToMove = (speedKmh / 3600) * deltaTime;
+                        let remainingOnSegmentKm = segDistKm * (1 - progress);
+                        if (kmToMove < remainingOnSegmentKm) {
+                            progress += kmToMove / segDistKm;
+                        } else {
+                            kmToMove -= remainingOnSegmentKm;
+                            currentIndex++;
+                            progress = 0;
+                            while (kmToMove > 0 && currentIndex < coords.length - 1) {
+                                [lat1, lon1] = coords[currentIndex];
+                                [lat2, lon2] = coords[currentIndex + 1];
+                                segDistKm = haversine(lat1, lon1, lat2, lon2);
+                                if (kmToMove < segDistKm) {
+                                    progress = kmToMove / segDistKm;
+                                    kmToMove = 0;
+                                } else {
+                                    kmToMove -= segDistKm;
+                                    currentIndex++;
+                                    progress = 0;
+                                }
+                            }
+                        }
+                        if (currentIndex >= coords.length - 1) return;
+                        [lat1, lon1] = coords[currentIndex];
+                        [lat2, lon2] = coords[currentIndex + 1];
+                        const lat = lat1 + (lat2 - lat1) * progress;
+                        const lon = lon1 + (lon2 - lon1) * progress;
+                        marker.setLatLng([lat, lon]);
+                        const el = marker.getElement();
+                        if (el) {
+                            const sp = el.querySelector('.speed-text');
+                            if (sp) sp.textContent = `${speedKmh.toFixed(1)} km/h`;
+                        }
+                        requestAnimationFrame(step);
+                    }
+                    requestAnimationFrame(step);
+                });
+        }
+        // police
+        createVehicle(
+            [14.974239253926584, 120.15520837942276],
+            [destination[0], destination[1] + 0.0001],
+            "Responder #123",
+            "https://cdn.jsdelivr.net/gh/49e06f61d/demo-assets/police-square.png",
+            "blue"
+        );
+        // firetruck
+        setTimeout(() => {
+            createVehicle(
+                [14.974695267236566, 120.15569072770103],
+                [destination[0], destination[1] - 0.0001],
+                "Responder #456",
+                "https://cdn.jsdelivr.net/gh/49e06f61d/demo-assets/firetruck-square.png",
+                "red"
+            );
+        }, 5000);
+        // ambulance
+        createVehicle(
+            [14.973543085521527, 120.15695183326652],
+            [destination[0], destination[1] - 0.0003],
+            "Responder #789",
+            "https://cdn.jsdelivr.net/gh/49e06f61d/demo-assets/ambulance-square.png",
+            "green"
+        );
+    </script>
+</body>
+
+</html>
